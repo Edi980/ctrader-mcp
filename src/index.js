@@ -16,7 +16,7 @@ app.get('/.well-known/mcp', (req, res) => {
     version: '1.0.0',
     description: 'cTrader IC Markets live data for MULTISNIPER07',
     mcp_version: '1.0',
-    endpoints: { sse: '/sse', messages: '/messages', mcp: '/mcp' }
+    endpoints: { sse: '/sse', messages: '/messages', mcp: '/mcp', icmarkets: '/icmarkets' }
   });
 });
 
@@ -94,6 +94,37 @@ app.post('/mcp', async (req, res) => {
   }
 });
 app.get('/mcp', (req, res) => {
+  res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
+});
+
+app.post('/icmarkets', async (req, res) => {
+  try {
+    const token = process.env.CTRADER_MCP_TOKEN;
+    if (!token) {
+      return res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Missing CTRADER_MCP_TOKEN env variable' }, id: null });
+    }
+    const upstream = await fetch('https://mcp.ctrader.com/trading/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': req.headers['accept'] || 'application/json, text/event-stream',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(req.body)
+    });
+    res.status(upstream.status);
+    const contentType = upstream.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+    const text = await upstream.text();
+    res.send(text);
+  } catch (err) {
+    console.error('Proxy error:', err);
+    if (!res.headersSent) {
+      res.status(502).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Proxy error: ' + err.message }, id: null });
+    }
+  }
+});
+app.get('/icmarkets', (req, res) => {
   res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
 });
 
