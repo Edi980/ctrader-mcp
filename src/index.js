@@ -16,7 +16,7 @@ app.get('/.well-known/mcp', (req, res) => {
     version: '1.0.0',
     description: 'cTrader IC Markets live data for MULTISNIPER07',
     mcp_version: '1.0',
-    endpoints: { sse: '/sse', messages: '/messages', mcp: '/mcp', icmarkets: '/icmarkets' }
+    endpoints: { sse: '/sse', messages: '/messages', mcp: '/mcp', icmarkets: '/icmarkets/mcp' }
   });
 });
 
@@ -97,7 +97,7 @@ app.get('/mcp', (req, res) => {
   res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
 });
 
-app.post('/icmarkets', async (req, res) => {
+app.post('/icmarkets/mcp', async (req, res) => {
   try {
     const token = process.env.CTRADER_MCP_TOKEN;
     if (!token) {
@@ -124,7 +124,7 @@ app.post('/icmarkets', async (req, res) => {
     }
   }
 });
-app.get('/icmarkets', (req, res) => {
+app.get('/icmarkets/mcp', (req, res) => {
   res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
 });
 
