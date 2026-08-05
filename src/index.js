@@ -1,207 +1,128 @@
 import 'dotenv/config';
 import express from 'express';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { getAccounts, getAccountDetails, getQuote, getOHLCV, getOpenPositions, getPendingOrders, getDealHistory, getSymbols } from './ctrader.js';
-import { getAuthorizationUrl, exchangeCode } from './auth.js';
+import crypto from 'crypto';
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-app.get('/.well-known/mcp', (req, res) => {
+const MCP_UPSTREAM = 'https://mcp.ctrader.com/trading/mcp';
+const REQ_HEADERS = ['content-type', 'accept', 'mcp-session-id', 'mcp-protocol-version'];
+const RES_HEADERS = ['content-type', 'mcp-session-id', 'mcp-protocol-version'];
+
+// ── OAuth shim (personal, single-user — kënaq handshake-un e Claude.ai, s'kufizon akses real) ──
+const clients = new Map();
+const authCodes = new Map();
+const accessTokens = new Map();
+
+function randomToken(bytes = 32) { return crypto.randomBytes(bytes).toString('base64url'); }
+function baseUrl(req) { return `${req.protocol}://${req.get('host')}`; }
+
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  const base = baseUrl(req);
   res.json({
-    name: 'MULTISNIPER07 MCP',
-    version: '1.0.0',
-    description: 'cTrader IC Markets live data for MULTISNIPER07',
-    mcp_version: '1.0',
-    endpoints: { sse: '/sse', messages: '/messages', mcp: '/mcp' }
+    issuer: base,
+    authorization_endpoint: `${base}/authorize`,
+    token_endpoint: `${base}/token`,
+    registration_endpoint: `${base}/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    code_challenge_methods_supported: ['S256', 'plain'],
+    token_endpoint_auth_methods_supported: ['none', 'client_secret_post']
   });
 });
 
-function createMCPServer() {
-  const server = new Server({ name: 'ctrader-multisniper07', version: '1.0.0' }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
-    { name: 'get_auth_url', description: 'Gjeneron URL autorizimi cTrader', inputSchema: { type: 'object', properties: {} } },
-    { name: 'exchange_auth_code', description: 'Shkemben code me token', inputSchema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
-    { name: 'get_accounts', description: 'Merr llogarite IC Markets', inputSchema: { type: 'object', properties: {} } },
-    { name: 'get_account_details', description: 'Balance equity margin', inputSchema: { type: 'object', properties: { account_id: { type: 'string' } }, required: ['account_id'] } },
-    { name: 'get_quote', description: 'Cmimi live bid ask per simbol', inputSchema: { type: 'object', properties: { account_id: { type: 'string' }, symbol: { type: 'string' } }, required: ['account_id','symbol'] } },
-    { name: 'get_ohlcv', description: 'Candlestick OHLCV data', inputSchema: { type: 'object', properties: { account_id: { type: 'string' }, symbol: { type: 'string' }, timeframe: { type: 'string' }, count: { type: 'number' } }, required: ['account_id','symbol','timeframe'] } },
-    { name: 'get_multiframe_data', description: 'W1 D1 H4 H1 M15 njeheresh per ILOS', inputSchema: { type: 'object', properties: { account_id: { type: 'string' }, symbol: { type: 'string' }, timeframes: { type: 'array', items: { type: 'string' } } }, required: ['account_id','symbol'] } },
-    { name: 'get_open_positions', description: 'Pozicionet aktuale', inputSchema: { type: 'object', properties: { account_id: { type: 'string' } }, required: ['account_id'] } },
-    { name: 'search_symbols', description: 'Kerko simbole XAUUSD BTCUSD', inputSchema: { type: 'object', properties: { account_id: { type: 'string' }, query: { type: 'string' } }, required: ['account_id'] } }
-  ]}));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    try {
-      let result;
-      if (name === 'get_auth_url') result = { auth_url: getAuthorizationUrl() };
-      else if (name === 'exchange_auth_code') result = await exchangeCode(args.code);
-      else if (name === 'get_accounts') result = await getAccounts();
-      else if (name === 'get_account_details') result = await getAccountDetails(args.account_id);
-      else if (name === 'get_quote') result = await getQuote(args.account_id, args.symbol);
-      else if (name === 'get_ohlcv') result = await getOHLCV(args.account_id, args.symbol, args.timeframe||'H4', args.count||100);
-      else if (name === 'get_multiframe_data') {
-        const tfs = args.timeframes||['W1','D1','H4','H1','M15'];
-        const results = {};
-        await Promise.allSettled(tfs.map(async tf => { try { results[tf] = await getOHLCV(args.account_id, args.symbol, tf, 50); } catch(e) { results[tf]={error:e.message}; } }));
-        result = { symbol: args.symbol.toUpperCase(), timestamp: new Date().toISOString(), timeframes: results };
-      }
-      else if (name === 'get_open_positions') result = await getOpenPositions(args.account_id);
-      else if (name === 'search_symbols') {
-        const all = await getSymbols(args.account_id);
-        const filtered = args.query ? all.filter(s=>s.name?.toUpperCase().includes(args.query.toUpperCase())) : all.slice(0,50);
-        result = { found: filtered.length, symbols: filtered.map(s=>({id:s.symbolId,name:s.name})) };
-      }
-      else throw new Error(`Tool "${name}" nuk njihet.`);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    } catch(error) {
-      return { content: [{ type: 'text', text: JSON.stringify({ error: true, message: error.message }) }], isError: true };
-    }
+app.get('/.well-known/oauth-protected-resource', (req, res) => {
+  const base = baseUrl(req);
+  res.json({ resource: `${base}/icmarkets/mcp`, authorization_servers: [base] });
+});
+
+app.post('/register', (req, res) => {
+  const client_id = randomToken(12);
+  const client_secret = randomToken(24);
+  const redirect_uris = req.body?.redirect_uris || [];
+  clients.set(client_id, { redirect_uris });
+  res.status(201).json({
+    client_id, client_secret,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    redirect_uris,
+    token_endpoint_auth_method: 'client_secret_post',
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code']
   });
-  return server;
+});
+
+app.get('/authorize', (req, res) => {
+  const { redirect_uri } = req.query;
+  if (!redirect_uri) return res.status(400).send('Missing redirect_uri');
+  res.send(`
+    <html><body style="font-family:sans-serif;text-align:center;padding:60px 20px;background:#111;color:#eee;">
+      <h2>Autorizo Claude.ai</h2>
+      <p>Lejo aksesin te Ctrader Trading MCP (të dhëna cTrader/IC Markets)?</p>
+      <a href="/authorize/confirm?${new URLSearchParams(req.query).toString()}"
+         style="display:inline-block;padding:12px 24px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;">Lejo</a>
+    </body></html>
+  `);
+});
+
+app.get('/authorize/confirm', (req, res) => {
+  const { redirect_uri, state, code_challenge } = req.query;
+  const code = randomToken(24);
+  authCodes.set(code, { code_challenge, expires: Date.now() + 5 * 60 * 1000 });
+  const url = new URL(redirect_uri);
+  url.searchParams.set('code', code);
+  if (state) url.searchParams.set('state', state);
+  res.redirect(url.toString());
+});
+
+app.post('/token', (req, res) => {
+  const { grant_type, code, code_verifier } = req.body;
+  if (grant_type === 'authorization_code') {
+    const entry = authCodes.get(code);
+    if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: 'invalid_grant' });
+    if (entry.code_challenge) {
+      const hash = crypto.createHash('sha256').update(code_verifier || '').digest('base64url');
+      if (hash !== entry.code_challenge) return res.status(400).json({ error: 'invalid_grant' });
+    }
+    authCodes.delete(code);
+    const access_token = randomToken(32);
+    const refresh = randomToken(32);
+    accessTokens.set(access_token, { expires: Date.now() + 3600 * 1000 });
+    return res.json({ access_token, token_type: 'Bearer', expires_in: 3600, refresh_token: refresh });
+  }
+  if (grant_type === 'refresh_token') {
+    const access_token = randomToken(32);
+    accessTokens.set(access_token, { expires: Date.now() + 3600 * 1000 });
+    return res.json({ access_token, token_type: 'Bearer', expires_in: 3600, refresh_token: req.body.refresh_token });
+  }
+  res.status(400).json({ error: 'unsupported_grant_type' });
+});
+// ── Fund OAuth shim ──
+
+async function proxyToUpstream(req, res) {
+  try {
+    const token = process.env.CTRADER_MCP_TOKEN;
+    if (!token) {
+      return res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Missing CTRADER_MCP_TOKEN env variable' }, id: null });
+    }
+    const headers = { 'Authorization': `Bearer ${token}` };
+    for (const h of REQ_HEADERS) { if (req.headers[h]) headers[h] = req.headers[h]; }
+    const fetchOptions = { method: req.method, headers };
+    if (req.method !== 'GET' && req.method !== 'HEAD') fetchOptions.body = JSON.stringify(req.body);
+    const upstream = await fetch(MCP_UPSTREAM, fetchOptions);
+    res.status(upstream.status);
+    for (const h of RES_HEADERS) { const v = upstream.headers.get(h); if (v) res.setHeader(h, v); }
+    const text = await upstream.text();
+    res.send(text);
+  } catch (err) {
+    console.error('Proxy error:', err);
+    if (!res.headersSent) res.status(502).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Proxy error: ' + err.message }, id: null });
+  }
 }
 
-const transports = {};
-app.get('/sse', async (req, res) => {
-  const transport = new SSEServerTransport('/messages', res);
-  transports[transport.sessionId] = transport;
-  res.on('close', () => { delete transports[transport.sessionId]; });
-  const server = createMCPServer();
-  await server.connect(transport);
-});
-app.post('/messages', async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const transport = transports[sessionId];
-  if (transport) { await transport.handlePostMessage(req, res); }
-  else { res.status(400).json({ error: 'Session not found' }); }
-});
-
-app.post('/mcp', async (req, res) => {
-  try {
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on('close', () => transport.close());
-    const server = createMCPServer();
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
-  } catch (err) {
-    console.error(err);
-    if (!res.headersSent) {
-      res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
-    }
-  }
-});
-app.get('/mcp', (req, res) => {
-  res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
-});
-
+app.all('/icmarkets/mcp', proxyToUpstream);
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'MULTISNIPER07 MCP v1.0' }));
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`[MULTISNIPER07 MCP] Server aktiv ne port ${PORT}`));
-EOFcat > src/index.js << 'EOF'
-import 'dotenv/config';
-import express from 'express';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { getAccounts, getAccountDetails, getQuote, getOHLCV, getOpenPositions, getPendingOrders, getDealHistory, getSymbols } from './ctrader.js';
-import { getAuthorizationUrl, exchangeCode } from './auth.js';
 
-const app = express();
-app.use(express.json());
-
-app.get('/.well-known/mcp', (req, res) => {
-  res.json({
-    name: 'MULTISNIPER07 MCP',
-    version: '1.0.0',
-    description: 'cTrader IC Markets live data for MULTISNIPER07',
-    mcp_version: '1.0',
-    endpoints: { sse: '/sse', messages: '/messages', mcp: '/mcp' }
-  });
-});
-
-function createMCPServer() {
-  const server = new Server({ name: 'ctrader-multisniper07', version: '1.0.0' }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
-    { name: 'get_auth_url', description: 'Gjeneron URL autorizimi cTrader', inputSchema: { type: 'object', properties: {} } },
-    { name: 'exchange_auth_code', description: 'Shkemben code me token', inputSchema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
-    { name: 'get_accounts', description: 'Merr llogarite IC Markets', inputSchema: { type: 'object', properties: {} } },
-    { name: 'get_account_details', description: 'Balance equity margin', inputSchema: { type: 'object', properties: { account_id: { type: 'string' } }, required: ['account_id'] } },
-    { name: 'get_quote', description: 'Cmimi live bid ask per simbol', inputSchema: { type: 'object', properties: { account_id: { type: 'string' }, symbol: { type: 'string' } }, required: ['account_id','symbol'] } },
-    { name: 'get_ohlcv', description: 'Candlestick OHLCV data', inputSchema: { type: 'object', properties: { account_id: { type: 'string' }, symbol: { type: 'string' }, timeframe: { type: 'string' }, count: { type: 'number' } }, required: ['account_id','symbol','timeframe'] } },
-    { name: 'get_multiframe_data', description: 'W1 D1 H4 H1 M15 njeheresh per ILOS', inputSchema: { type: 'object', properties: { account_id: { type: 'string' }, symbol: { type: 'string' }, timeframes: { type: 'array', items: { type: 'string' } } }, required: ['account_id','symbol'] } },
-    { name: 'get_open_positions', description: 'Pozicionet aktuale', inputSchema: { type: 'object', properties: { account_id: { type: 'string' } }, required: ['account_id'] } },
-    { name: 'search_symbols', description: 'Kerko simbole XAUUSD BTCUSD', inputSchema: { type: 'object', properties: { account_id: { type: 'string' }, query: { type: 'string' } }, required: ['account_id'] } }
-  ]}));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    try {
-      let result;
-      if (name === 'get_auth_url') result = { auth_url: getAuthorizationUrl() };
-      else if (name === 'exchange_auth_code') result = await exchangeCode(args.code);
-      else if (name === 'get_accounts') result = await getAccounts();
-      else if (name === 'get_account_details') result = await getAccountDetails(args.account_id);
-      else if (name === 'get_quote') result = await getQuote(args.account_id, args.symbol);
-      else if (name === 'get_ohlcv') result = await getOHLCV(args.account_id, args.symbol, args.timeframe||'H4', args.count||100);
-      else if (name === 'get_multiframe_data') {
-        const tfs = args.timeframes||['W1','D1','H4','H1','M15'];
-        const results = {};
-        await Promise.allSettled(tfs.map(async tf => { try { results[tf] = await getOHLCV(args.account_id, args.symbol, tf, 50); } catch(e) { results[tf]={error:e.message}; } }));
-        result = { symbol: args.symbol.toUpperCase(), timestamp: new Date().toISOString(), timeframes: results };
-      }
-      else if (name === 'get_open_positions') result = await getOpenPositions(args.account_id);
-      else if (name === 'search_symbols') {
-        const all = await getSymbols(args.account_id);
-        const filtered = args.query ? all.filter(s=>s.name?.toUpperCase().includes(args.query.toUpperCase())) : all.slice(0,50);
-        result = { found: filtered.length, symbols: filtered.map(s=>({id:s.symbolId,name:s.name})) };
-      }
-      else throw new Error(`Tool "${name}" nuk njihet.`);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    } catch(error) {
-      return { content: [{ type: 'text', text: JSON.stringify({ error: true, message: error.message }) }], isError: true };
-    }
-  });
-  return server;
-}
-
-const transports = {};
-app.get('/sse', async (req, res) => {
-  const transport = new SSEServerTransport('/messages', res);
-  transports[transport.sessionId] = transport;
-  res.on('close', () => { delete transports[transport.sessionId]; });
-  const server = createMCPServer();
-  await server.connect(transport);
-});
-app.post('/messages', async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const transport = transports[sessionId];
-  if (transport) { await transport.handlePostMessage(req, res); }
-  else { res.status(400).json({ error: 'Session not found' }); }
-});
-
-app.post('/mcp', async (req, res) => {
-  try {
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on('close', () => transport.close());
-    const server = createMCPServer();
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
-  } catch (err) {
-    console.error(err);
-    if (!res.headersSent) {
-      res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
-    }
-  }
-});
-app.get('/mcp', (req, res) => {
-  res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
-});
-
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'MULTISNIPER07 MCP v1.0' }));
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`[MULTISNIPER07 MCP] Server aktiv ne port ${PORT}`));
