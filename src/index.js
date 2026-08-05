@@ -3,6 +3,7 @@ import express from 'express';
 import crypto from 'crypto';
 
 const app = express();
+app.set('trust proxy', true);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
