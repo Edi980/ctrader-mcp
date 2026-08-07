@@ -11,7 +11,6 @@ const MCP_UPSTREAM = 'https://mcp.ctrader.com/trading/mcp';
 const REQ_HEADERS = ['content-type', 'accept', 'mcp-session-id', 'mcp-protocol-version'];
 const RES_HEADERS = ['content-type', 'mcp-session-id', 'mcp-protocol-version'];
 
-// ── OAuth shim (personal, single-user — kënaq handshake-un e Claude.ai, s'kufizon akses real) ──
 const clients = new Map();
 const authCodes = new Map();
 const accessTokens = new Map();
@@ -59,7 +58,7 @@ app.get('/authorize', (req, res) => {
   res.send(`
     <html><body style="font-family:sans-serif;text-align:center;padding:60px 20px;background:#111;color:#eee;">
       <h2>Autorizo Claude.ai</h2>
-      <p>Lejo aksesin te Ctrader Trading MCP (të dhëna cTrader/IC Markets)?</p>
+      <p>Lejo aksesin te Ctrader Trading MCP?</p>
       <a href="/authorize/confirm?${new URLSearchParams(req.query).toString()}"
          style="display:inline-block;padding:12px 24px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;">Lejo</a>
     </body></html>
@@ -98,13 +97,39 @@ app.post('/token', (req, res) => {
   }
   res.status(400).json({ error: 'unsupported_grant_type' });
 });
-// ── Fund OAuth shim ──
+
+async function sendTelegram(text) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.error('[TELEGRAM] Mungon TELEGRAM_BOT_TOKEN ose TELEGRAM_CHAT_ID');
+    return { ok: false, error: 'missing_env' };
+  }
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' })
+    });
+    return await r.json();
+  } catch (err) {
+    console.error('[TELEGRAM] Gabim:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+app.get('/test-telegram', async (req, res) => {
+  const result = await sendTelegram(
+    '✅ <b>TEST — MULTISNIPER07</b>\nServeri u lidh me sukses me Telegram.\n🟢 Live dhe gati.'
+  );
+  res.json(result);
+});
 
 async function proxyToUpstream(req, res) {
   try {
     const token = process.env.CTRADER_MCP_TOKEN;
     if (!token) {
-      return res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Missing CTRADER_MCP_TOKEN env variable' }, id: null });
+      return res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Missing CTRADER_MCP_TOKEN' }, id: null });
     }
     const headers = { 'Authorization': `Bearer ${token}` };
     for (const h of REQ_HEADERS) { if (req.headers[h]) headers[h] = req.headers[h]; }
@@ -122,8 +147,27 @@ async function proxyToUpstream(req, res) {
 }
 
 app.all('/icmarkets/mcp', proxyToUpstream);
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'MULTISNIPER07 MCP v1.0' }));
+
+app.get('/health', (req, res) => res.json({
+  status: 'ok',
+  service: 'MULTISNIPER07 MCP v1.0',
+  watches: activeWatches.size,
+  uptime: Math.floor(process.uptime()) + 's'
+}));
+
+const activeWatches = new Map();
+
+const SERVER_URL = process.env.SERVER_URL || '';
+if (SERVER_URL) {
+  setInterval(async () => {
+    try {
+      await fetch(`${SERVER_URL}/health`);
+      console.log('[PING] Server aktiv');
+    } catch (e) {
+      console.error('[PING] Gabim:', e.message);
+    }
+  }, 10 * 60 * 1000);
+}
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`[MULTISNIPER07 MCP] Server aktiv ne port ${PORT}`));
-
