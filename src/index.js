@@ -621,7 +621,18 @@ async function proxyToUpstream(req, res) {
     for (const h of REQ_HEADERS) { if (req.headers[h]) headers[h] = req.headers[h]; }
     const fetchOptions = { method: req.method, headers };
     if (req.method !== 'GET' && req.method !== 'HEAD') fetchOptions.body = JSON.stringify(req.body);
+
+    // Diagnostic logs to see whether request reaches Express and whether fetch hangs
+    try {
+      console.log('[PROXY] Sending request to upstream, method:', req.method, 'body:', JSON.stringify(req.body));
+    } catch (e) {
+      console.log('[PROXY] Sending request to upstream, method:', req.method, 'body: <unserializable>');
+    }
+
     const upstream = await fetch(MCP_UPSTREAM, { ...fetchOptions, signal: AbortSignal.timeout(15000) });
+
+    console.log('[PROXY] Upstream responded with status:', upstream.status);
+
     res.status(upstream.status);
     for (const h of RES_HEADERS) { const v = upstream.headers.get(h); if (v) res.setHeader(h, v); }
     let text = await upstream.text();
