@@ -484,8 +484,9 @@ function extractArray(result) {
 // ── REGISTER_WATCH SI MCP TOOL (i injektuar) ──
 const REGISTER_WATCH_TOOL = {
   name: 'register_watch',
-  description: 'Regjistron një setup tregtimi (nga ICT Sniper) për monitorim automatik live me MCP. Kur konfirmohet (VULA FINALE) ose dështon (SL prek), dërgon njoftim në Telegram. Thirre me[...]',
+  description: 'Regjistron një setup tregtimi (nga ICT Sniper) për monitorim automatik live me MCP. Kur konfirmohet (VULA FINALE) ose dështon (SL prek), dërgon njoftim në Telegram. Thirre menjëherë pasi gjenerohet Format A/B nga analiza, me të gjitha vlerat numerike (jo interval).',
   inputSchema: {
+    $schema: 'http://json-schema.org/draft-07/schema#',
     type: 'object',
     properties: {
       symbol: { type: 'string', description: 'Simboli, p.sh. BTCUSD, XAUUSD' },
@@ -499,7 +500,14 @@ const REGISTER_WATCH_TOOL = {
       conviction: { type: 'string' }
     },
     required: ['symbol', 'direction', 'entry', 'sl', 'tp1']
-  }
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false
+  },
+  execution: { taskSupport: 'forbidden' }
 };
 
 async function handleRegisterWatchCall(args) {
