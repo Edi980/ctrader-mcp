@@ -8,9 +8,11 @@ const UPSTREAM = 'https://mcp.ctrader.com/trading/mcp';
 const SLUG = process.env.CTRADER_MCP_TOKEN;
 if (!SLUG) { console.error('FATAL: CTRADER_MCP_TOKEN missing'); process.exit(1); }
 
+const SERVER_INFO = { name: 'MULTISNIPER07 MCP', version: '2.0.0' };
+const SUPPORTED_PROTOCOL = '2025-03-26';
 const watches = new Map();
 
-// Middleware Global për CORS (Zgjidhja absolute pa yje '*')
+// Middleware Global për CORS (Zgjidhja absolute)
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -20,8 +22,9 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', watches: watches.size }));
+app.get('/health', (req, res) => res.json({ status: 'ok', service: SERVER_INFO.name, watches: watches.size }));
 
+// Krijimi i Sesionit
 app.get('/icmarkets/mcp', async (req, res) => {
   const sid = req.get('mcp-session-id') || randomUUID();
   res.setHeader('Content-Type', 'text/event-stream');
@@ -42,6 +45,7 @@ app.get('/icmarkets/mcp', async (req, res) => {
   }
 });
 
+// Komunikimi
 app.post('/icmarkets/mcp', async (req, res) => {
   const sid = req.get('mcp-session-id');
   if (sid) res.setHeader('Mcp-Session-Id', sid);
@@ -50,6 +54,23 @@ app.post('/icmarkets/mcp', async (req, res) => {
   if (!body || body.jsonrpc !== '2.0') return res.status(400).json({ error: 'Parse error' });
 
   const { id, method, params } = body;
+
+  // --- KJO ËSHTË PJESA QË MUNGONTE PËR GEMINI ---
+  if (method === 'initialize') {
+    const requested = (params && params.protocolVersion) || SUPPORTED_PROTOCOL;
+    return res.json({
+      jsonrpc: '2.0', id,
+      result: {
+        protocolVersion: requested,
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: SERVER_INFO,
+        instructions: 'cTrader MCP proxy for IC Markets demo.',
+      },
+    });
+  }
+  if (typeof method === 'string' && method.startsWith('notifications/')) return res.status(202).end();
+  if (method === 'ping') return res.json({ jsonrpc: '2.0', id, result: {} });
+  // ----------------------------------------------
 
   if (method === 'tools/call' && params?.name === 'register_watch') {
     const wid = randomUUID();
@@ -95,4 +116,4 @@ app.post('/icmarkets/mcp', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('[boot] MULTISNIPER07 on :' + PORT));
+app.listen(PORT, () => console.log('[boot] MULTISNIPER07 MCP proxy on :' + PORT));
