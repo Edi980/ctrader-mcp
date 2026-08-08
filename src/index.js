@@ -462,6 +462,79 @@ function extractArray(result) {
   return [];
 }
 
+// ── REGISTER_WATCH SI MCP TOOL (i injektuar) ──
+const REGISTER_WATCH_TOOL = {
+  name: 'register_watch',
+  description: 'Regjistron një setup tregtimi (nga ICT Sniper) për monitorim automatik live me MCP. Kur konfirmohet (VULA FINALE) ose dështon (SL prek), dërgon njoftim në Telegram. Thirre menjëherë pasi gjenerohet Format A/B nga analiza, me të gjitha vlerat numerike (jo intervale).',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      symbol: { type: 'string', description: 'Simboli, p.sh. BTCUSD, XAUUSD' },
+      direction: { type: 'string', enum: ['buy', 'sell'] },
+      entry: { type: 'number', description: 'Çmim i vetëm, jo interval' },
+      sl: { type: 'number' },
+      tp1: { type: 'number' },
+      tp2: { type: 'number' },
+      tp3: { type: 'number' },
+      setup_model: { type: 'string' },
+      conviction: { type: 'string' }
+    },
+    required: ['symbol', 'direction', 'entry', 'sl', 'tp1']
+  }
+};
+
+async function handleRegisterWatchCall(args) {
+  const { symbol, direction, entry, sl, tp1, tp2, tp3, setup_model, conviction } = args || {};
+  if (!symbol || !direction || entry == null || sl == null || tp1 == null) {
+    return { error: 'Mungojnë parametrat: symbol, direction, entry, sl, tp1 janë të detyrueshëm' };
+  }
+  const watchId = `${symbol}_${Date.now()}`;
+  const watch = {
+    id: watchId, symbol: symbol.toUpperCase(), direction: direction.toLowerCase(),
+    entry: parseFloat(entry), sl: parseFloat(sl), tp1: parseFloat(tp1),
+    tp2: tp2 != null ? parseFloat(tp2) : null, tp3: tp3 != null ? parseFloat(tp3) : null,
+    setup_model: setup_model || 'Unknown', conviction: conviction || 'B',
+    status: 'ACTIVE', entryTouched: false, entryTouchedAt: null, createdAt: Date.now()
+  };
+  watch.intervalId = setInterval(() => monitorWatch(watchId), 10000);
+  activeWatches.set(watchId, watch);
+  console.log(`[WATCH] Regjistruar (via MCP tool): ${watchId}`, watch);
+  await sendTelegram(
+    `👁️ <b>SETUP AKTIV — Duke monitoruar</b>\n\n` +
+    `📊 <b>${watch.symbol}</b> — ${watch.direction.toUpperCase()}\n` +
+    `💰 <b>Entry:</b> ${watch.entry}\n🛑 <b>SL:</b> ${watch.sl}\n` +
+    `🎯 <b>TP1:</b> ${watch.tp1}\n🎯 <b>TP2:</b> ${watch.tp2 || '—'}\n🎯 <b>TP3:</b> ${watch.tp3 || '—'}\n` +
+    `📈 <b>Model:</b> ${watch.setup_model}\n⭐ <b>Conviction:</b> ${watch.conviction}\n\n` +
+    `⏱️ Duke pritur entry @ ${watch.entry}...`
+  );
+  return { status: 'WATCHING', watch_id: watchId, message: `Monitor aktiv për ${watch.symbol} — entry @ ${watch.entry}` };
+}
+
+function injectRegisterWatchTool(text) {
+  try {
+    if (text.includes('data:')) {
+      return text.split('\n').map(line => {
+        if (line.startsWith('data:')) {
+          try {
+            const parsed = JSON.parse(line.replace('data:', '').trim());
+            if (parsed.result && Array.isArray(parsed.result.tools)) {
+              parsed.result.tools.push(REGISTER_WATCH_TOOL);
+              return 'data: ' + JSON.stringify(parsed);
+            }
+          } catch {}
+        }
+        return line;
+      }).join('\n');
+    }
+    const parsed = JSON.parse(text);
+    if (parsed.result && Array.isArray(parsed.result.tools)) parsed.result.tools.push(REGISTER_WATCH_TOOL);
+    return JSON.stringify(parsed);
+  } catch (err) {
+    console.error('[INJECT] Gabim:', err.message);
+    return text;
+  }
+}
+
 // ── REGISTER WATCH ENDPOINT (Spark/Claude e thërret këtë) ──
 app.post('/register_watch', async (req, res) => {
   const { symbol, direction, entry, sl, tp1, tp2, tp3, setup_model, conviction } = req.body;
@@ -518,6 +591,15 @@ app.post('/register_watch', async (req, res) => {
 // ── PROXY (MCP — Gemini Spark & Claude.ai përdorin këtë) ──
 async function proxyToUpstream(req, res) {
   try {
+    if (req.method === 'POST' && req.body && req.body.method === 'tools/call' &&
+        req.body.params && req.body.params.name === 'register_watch') {
+      const result = await handleRegisterWatchCall(req.body.params.arguments);
+      return res.status(200).json({
+        jsonrpc: '2.0', id: req.body.id,
+        result: { content: [{ type: 'text', text: JSON.stringify(result) }] }
+      });
+    }
+
     const token = process.env.CTRADER_MCP_TOKEN;
     if (!token) {
       return res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Missing CTRADER_MCP_TOKEN' }, id: null });
@@ -529,7 +611,11 @@ async function proxyToUpstream(req, res) {
     const upstream = await fetch(MCP_UPSTREAM, fetchOptions);
     res.status(upstream.status);
     for (const h of RES_HEADERS) { const v = upstream.headers.get(h); if (v) res.setHeader(h, v); }
-    const text = await upstream.text();
+    let text = await upstream.text();
+
+    if (req.method === 'POST' && req.body && req.body.method === 'tools/list') {
+      text = injectRegisterWatchTool(text);
+    }
     res.send(text);
   } catch (err) {
     console.error('Proxy error:', err);
