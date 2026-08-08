@@ -1,103 +1,13 @@
 import 'dotenv/config';
 import express from 'express';
-import crypto from 'crypto';
 
 const app = express();
 app.set('trust proxy', true);
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 const MCP_UPSTREAM = 'https://mcp.ctrader.com/trading/mcp';
 const REQ_HEADERS = ['content-type', 'accept', 'mcp-session-id', 'mcp-protocol-version'];
 const RES_HEADERS = ['content-type', 'mcp-session-id', 'mcp-protocol-version'];
-
-// ── OAuth shim ──
-const clients = new Map();
-const authCodes = new Map();
-const accessTokens = new Map();
-
-function randomToken(bytes = 32) { return crypto.randomBytes(bytes).toString('base64url'); }
-function baseUrl(req) { return `${req.protocol}://${req.get('host')}`; }
-
-app.get('/.well-known/oauth-authorization-server', (req, res) => {
-  const base = baseUrl(req);
-  res.json({
-    issuer: base,
-    authorization_endpoint: `${base}/authorize`,
-    token_endpoint: `${base}/token`,
-    registration_endpoint: `${base}/register`,
-    response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code', 'refresh_token'],
-    code_challenge_methods_supported: ['S256', 'plain'],
-    token_endpoint_auth_methods_supported: ['none', 'client_secret_post']
-  });
-});
-
-app.get('/.well-known/oauth-protected-resource', (req, res) => {
-  const base = baseUrl(req);
-  res.json({ resource: `${base}/icmarkets/mcp`, authorization_servers: [base] });
-});
-
-app.post('/register', (req, res) => {
-  const client_id = randomToken(12);
-  const client_secret = randomToken(24);
-  const redirect_uris = req.body?.redirect_uris || [];
-  clients.set(client_id, { redirect_uris });
-  res.status(201).json({
-    client_id, client_secret,
-    client_id_issued_at: Math.floor(Date.now() / 1000),
-    redirect_uris,
-    token_endpoint_auth_method: 'client_secret_post',
-    grant_types: ['authorization_code', 'refresh_token'],
-    response_types: ['code']
-  });
-});
-
-app.get('/authorize', (req, res) => {
-  const { redirect_uri } = req.query;
-  if (!redirect_uri) return res.status(400).send('Missing redirect_uri');
-  res.send(`
-    <html><body style="font-family:sans-serif;text-align:center;padding:60px 20px;background:#111;color:#eee;">
-      <h2>Autorizo Claude.ai</h2>
-      <p>Lejo aksesin te Ctrader Trading MCP?</p>
-      <a href="/authorize/confirm?${new URLSearchParams(req.query).toString()}"
-         style="display:inline-block;padding:12px 24px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;">Lejo</a>
-    </body></html>
-  `);
-});
-
-app.get('/authorize/confirm', (req, res) => {
-  const { redirect_uri, state, code_challenge } = req.query;
-  const code = randomToken(24);
-  authCodes.set(code, { code_challenge, expires: Date.now() + 5 * 60 * 1000 });
-  const url = new URL(redirect_uri);
-  url.searchParams.set('code', code);
-  if (state) url.searchParams.set('state', state);
-  res.redirect(url.toString());
-});
-
-app.post('/token', (req, res) => {
-  const { grant_type, code, code_verifier } = req.body;
-  if (grant_type === 'authorization_code') {
-    const entry = authCodes.get(code);
-    if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: 'invalid_grant' });
-    if (entry.code_challenge) {
-      const hash = crypto.createHash('sha256').update(code_verifier || '').digest('base64url');
-      if (hash !== entry.code_challenge) return res.status(400).json({ error: 'invalid_grant' });
-    }
-    authCodes.delete(code);
-    const access_token = randomToken(32);
-    const refresh = randomToken(32);
-    accessTokens.set(access_token, { expires: Date.now() + 3600 * 1000 });
-    return res.json({ access_token, token_type: 'Bearer', expires_in: 3600, refresh_token: refresh });
-  }
-  if (grant_type === 'refresh_token') {
-    const access_token = randomToken(32);
-    accessTokens.set(access_token, { expires: Date.now() + 3600 * 1000 });
-    return res.json({ access_token, token_type: 'Bearer', expires_in: 3600, refresh_token: req.body.refresh_token });
-  }
-  res.status(400).json({ error: 'unsupported_grant_type' });
-});
 
 // ── SMT BUNDLES (nga tool_mapping.md §7) ──
 const SMT_BUNDLES = {
@@ -113,6 +23,15 @@ const SMT_BUNDLES = {
 
 // ── WATCH STATE ──
 const activeWatches = new Map();
+
+// ── ENTRY TOUCH BUFFER (i rregulluar — shkallëzuar sipas asset class, jo vetëm XAUUSD) ──
+function getEntryBuffer(symbol, entry) {
+  if (symbol === 'XAUUSD') return 0.10;
+  if (symbol === 'XAGUSD') return 0.02;
+  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return entry * 0.0005;
+  if (symbol === 'NAS100' || symbol === 'US30' || symbol === 'SPX500') return entry * 0.0003;
+  return 0.0001; // forex default (~1 pip)
+}
 
 // ── MCP TOOL CALLER (via proxy) ──
 async function callMcpTool(toolName, args, sessionId) {
@@ -137,7 +56,6 @@ async function callMcpTool(toolName, args, sessionId) {
   });
   const text = await r.text();
 
-  // parse SSE ose JSON direkt
   if (text.includes('data:')) {
     const lines = text.split('\n').filter(l => l.startsWith('data:'));
     for (const line of lines) {
@@ -206,9 +124,7 @@ function classifyWick(candle, atr, direction) {
     : candle.close <= candle.low + 0.25 * range;
   const isDisplacement = range >= 1.5 * atr;
 
-  // WICK I FORTË: fluturim real (3x + mbyllje fort + displacement)
   if (wickRatio >= 3 && closesStrong && isDisplacement) return 'strong';
-  // WICK I BUTË: refuzim normal
   if (wickRatio >= 2) return 'soft';
   return 'none';
 }
@@ -225,8 +141,7 @@ function classifyEngulfing(candles, direction, timeframe) {
 
   const isBullishEngulf = direction === 'buy' &&
     curr.close > prev.open &&
-    curr.open < prev.close &&
-    curr.close > prev.open;
+    curr.open < prev.close;
 
   const isBearishEngulf = direction === 'sell' &&
     curr.close < prev.open &&
@@ -237,9 +152,7 @@ function classifyEngulfing(candles, direction, timeframe) {
 
   const isStrong = currBody >= 1.5 * prevBody;
 
-  // M5 engulfing i fortë = FORT
   if (timeframe === 'M5' && isStrong) return 'strong';
-  // M1 engulfing ose M5 i dobët = BUTË
   if (timeframe === 'M1' || (timeframe === 'M5' && !isStrong)) return 'soft';
   return 'none';
 }
@@ -248,20 +161,14 @@ function classifyEngulfing(candles, direction, timeframe) {
 function checkCISD(candles, direction) {
   if (!candles || candles.length < 3) return false;
 
-  // Gjej swing high/low të fundit
   const lookback = candles.slice(-20);
-  let swingLevel = null;
 
   if (direction === 'buy') {
-    // Kërko swing low — CISD kur body close kalon poshtë swing low-in
-    // pastaj kthehet lart me body close mbi swing low
     let swingLow = Math.min(...lookback.slice(0, -1).map(c => c.low));
     const lastCandle = candles[candles.length - 1];
-    // CISD bullish: çmimi shkoi poshtë swing low, pastaj mbylli mbi të
     const prevCandle = candles[candles.length - 2];
     if (prevCandle.low < swingLow && lastCandle.close > swingLow) return true;
   } else {
-    // CISD bearish: çmimi shkoi mbi swing high, pastaj mbylli nën të
     let swingHigh = Math.max(...lookback.slice(0, -1).map(c => c.high));
     const lastCandle = candles[candles.length - 1];
     const prevCandle = candles[candles.length - 2];
@@ -283,18 +190,15 @@ function checkSMT(mainCandles, smt1Candles, smt2Candles, direction) {
     const smtPrev   = smtCandles[smtCandles.length - 2];
 
     if (direction === 'buy') {
-      // Main bën lower low, SMT nuk e bën (divergjencë bullish)
       const mainLowerLow = mainRecent.low < mainPrev.low;
       if (!isInverse) {
         const smtLowerLow = smtRecent.low < smtPrev.low;
         return mainLowerLow && !smtLowerLow;
       } else {
-        // EURUSD është inverse proxy: kur XAU bie, EUR duhet të rritet
         const eurHigherHigh = smtRecent.high > smtPrev.high;
         return mainLowerLow && !eurHigherHigh;
       }
     } else {
-      // Main bën higher high, SMT nuk e bën (divergjencë bearish)
       const mainHigherHigh = mainRecent.high > mainPrev.high;
       if (!isInverse) {
         const smtHigherHigh = smtRecent.high > smtPrev.high;
@@ -306,26 +210,19 @@ function checkSMT(mainCandles, smt1Candles, smt2Candles, direction) {
     }
   }
 
-  const bundle = SMT_BUNDLES[mainCandles.symbol] || { primary: null, inverse: null };
   const primaryDiverges = smt1Candles ? diverges(smt1Candles, false) : false;
   const inverseDiverges  = smt2Candles ? diverges(smt2Candles, true)  : false;
 
-  // TRUE nëse të paktën njëri divergjon
   return primaryDiverges || inverseDiverges;
 }
 
-// ── LOGJIKA E VULËS FINALE (të gjitha kombinimet) ──
+// ── LOGJIKA E VULËS FINALE ──
 function evaluateConfirmation(signals) {
   const { cisd, smt, engulfM5, wickStrong, wickSoft, engulfM1 } = signals;
 
-  // Sinjalet FORT (secili vetëm mjafton)
   const hasFort = cisd || smt || engulfM5 || wickStrong;
-
-  // Numëro të gjitha sinjalet aktive
   const all = [cisd, smt, engulfM5, wickStrong, wickSoft, engulfM1];
   const total = all.filter(Boolean).length;
-
-  // Numëro sinjalet e buta
   const softCount = [wickSoft, engulfM1].filter(Boolean).length;
 
   let enter = false;
@@ -338,17 +235,11 @@ function evaluateConfirmation(signals) {
   if (wickSoft)   reason.push('Wick Refuzim');
   if (engulfM1)   reason.push('Engulfing M1');
 
-  // RREGULLA (të gjitha kombinimet):
-  // 1. Ndonjë FORT vetëm → HYR menjëherë
   if (hasFort) {
     enter = true;
-  }
-  // 2. 2 të buta bashkë (wick soft + engulf M1) → HYR (quorum)
-  else if (softCount >= 2) {
+  } else if (softCount >= 2) {
     enter = true;
-  }
-  // 3. Vetëm 1 sinjal i butë → JO
-  else {
+  } else {
     enter = false;
   }
 
@@ -373,16 +264,13 @@ async function monitorWatch(watchId) {
     if (bundle.primary) symbols.push(bundle.primary);
     if (bundle.inverse) symbols.push(bundle.inverse);
 
-    // 1. Merr çmimin live
     const spotResult = await callMcpTool('get_spot_prices', { symbols });
     if (!spotResult) {
       console.error(`[MONITOR] ${watchId} — get_spot_prices dështoi`);
       return;
     }
 
-    // Parse spot prices
     let spots = {};
-    const spotText = JSON.stringify(spotResult);
     try {
       const arr = extractArray(spotResult);
       for (const s of arr) {
@@ -401,7 +289,6 @@ async function monitorWatch(watchId) {
 
     console.log(`[MONITOR] ${watchId} — ${watch.symbol} mid=${mid} entry=${watch.entry} sl=${watch.sl} tp1=${watch.tp1}`);
 
-    // 2. KONTROLLO SKADIMIN (TP1 preket para entry)
     if (!watch.entryTouched) {
       if (direction === 'buy' && mid >= watch.tp1) {
         await expireWatch(watchId, 'TP1 u prek pa u aktivizuar entry — setup skadoi');
@@ -413,7 +300,6 @@ async function monitorWatch(watchId) {
       }
     }
 
-    // 3. KONTROLLO SL PA KONFIRMIM
     if (!watch.entryTouched) {
       if (direction === 'buy' && mid <= watch.sl) {
         await expireWatch(watchId, 'SL u prek pa u aktivizuar entry — setup skadoi');
@@ -425,9 +311,9 @@ async function monitorWatch(watchId) {
       }
     }
 
-    // 4. KONTROLLO ENTRY TOUCH
-    const entryLow  = watch.entry - (watch.symbol === 'XAUUSD' ? 0.10 : 0.0001);
-    const entryHigh = watch.entry + (watch.symbol === 'XAUUSD' ? 0.10 : 0.0001);
+    const buffer = getEntryBuffer(watch.symbol, watch.entry);
+    const entryLow  = watch.entry - buffer;
+    const entryHigh = watch.entry + buffer;
     const entryTouched = direction === 'buy'
       ? mid <= entryHigh && mid >= watch.sl
       : mid >= entryLow  && mid <= watch.sl;
@@ -438,10 +324,7 @@ async function monitorWatch(watchId) {
       console.log(`[MONITOR] ${watchId} — ENTRY PREKUR @ ${mid}`);
     }
 
-    // 5. PAS ENTRY TOUCH — KONTROLLO 4 SINJALET
     if (watch.entryTouched) {
-
-      // SL preket pas entry → dështim
       if (direction === 'buy' && mid <= watch.sl) {
         await failWatch(watchId, mid);
         return;
@@ -451,7 +334,6 @@ async function monitorWatch(watchId) {
         return;
       }
 
-      // Merr qirinjtë M5 dhe M1 për analizë
       const [m5Main, m1Main, m5Smt1, m5Smt2] = await Promise.all([
         callMcpTool('get_trendbars', { symbol: watch.symbol, timeframe: 'M5', count: 30 }),
         callMcpTool('get_trendbars', { symbol: watch.symbol, timeframe: 'M1', count: 20 }),
@@ -470,7 +352,6 @@ async function monitorWatch(watchId) {
       const lastM5 = m5Candles[m5Candles.length - 1];
       const lastM1 = m1Candles ? m1Candles[m1Candles.length - 1] : null;
 
-      // Llogarit të gjitha sinjalet
       const wickTypeM5 = classifyWick(lastM5, atr, direction);
       const wickTypeM1 = lastM1 ? classifyWick(lastM1, calcATR(m1Candles), direction) : 'none';
       const engulfTypeM5 = classifyEngulfing(m5Candles, direction, 'M5');
@@ -581,11 +462,10 @@ function extractArray(result) {
   return [];
 }
 
-// ── REGISTER WATCH ENDPOINT (Spark e thërret këtë) ──
+// ── REGISTER WATCH ENDPOINT (Spark/Claude e thërret këtë) ──
 app.post('/register_watch', async (req, res) => {
   const { symbol, direction, entry, sl, tp1, tp2, tp3, setup_model, conviction } = req.body;
 
-  // Validim bazik
   if (!symbol || !direction || !entry || !sl || !tp1) {
     return res.status(400).json({
       error: 'Mungojnë parametrat: symbol, direction, entry, sl, tp1 janë të detyrueshëm'
@@ -610,13 +490,11 @@ app.post('/register_watch', async (req, res) => {
     createdAt: Date.now()
   };
 
-  // Nis monitor çdo 10 sekonda
   watch.intervalId = setInterval(() => monitorWatch(watchId), 10000);
   activeWatches.set(watchId, watch);
 
   console.log(`[WATCH] Regjistruar: ${watchId}`, watch);
 
-  // Njofto Telegram që setup u regjistrua
   await sendTelegram(
     `👁️ <b>SETUP AKTIV — Duke monitoruar</b>\n\n` +
     `📊 <b>${watch.symbol}</b> — ${watch.direction.toUpperCase()}\n` +
@@ -637,7 +515,7 @@ app.post('/register_watch', async (req, res) => {
   });
 });
 
-// ── PROXY ──
+// ── PROXY (MCP — Gemini Spark & Claude.ai përdorin këtë) ──
 async function proxyToUpstream(req, res) {
   try {
     const token = process.env.CTRADER_MCP_TOKEN;
