@@ -67,7 +67,6 @@ async function refreshTools() {
   }
 }
 
-app.options('*', (req, res) => { setCors(res); res.status(204).end(); });
 
 app.get('/health', (req, res) => {
   res.json({
