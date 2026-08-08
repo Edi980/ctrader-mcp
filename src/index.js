@@ -670,6 +670,7 @@ app.get('/', (req, res) => {
 });
 
 app.all('/icmarkets/mcp', proxyToUpstream);
+app.all('/mcp', proxyToUpstream);
 
 // ── HEALTH ──
 app.get('/health', (req, res) => res.json({
