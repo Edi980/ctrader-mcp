@@ -18,6 +18,12 @@ app.use((req, res, next) => {
   next();
 });
 
+// Simple request logger to help debug whether requests reach Express
+app.use((req, res, next) => {
+  console.log(`[REQ] ${req.method} ${req.path} — headers:`, JSON.stringify(req.headers));
+  next();
+});
+
 const MCP_UPSTREAM = 'https://mcp.ctrader.com/trading/mcp';
 const REQ_HEADERS = ['content-type', 'accept', 'mcp-session-id', 'mcp-protocol-version'];
 const RES_HEADERS = ['content-type', 'mcp-session-id', 'mcp-protocol-version'];
