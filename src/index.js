@@ -661,6 +661,14 @@ async function proxyToUpstream(req, res) {
   }
 }
 
+app.get('/', (req, res) => {
+  res.json({
+    service: 'MULTISNIPER07 MCP Proxy',
+    status: 'ok',
+    mcp_endpoint: '/icmarkets/mcp'
+  });
+});
+
 app.all('/icmarkets/mcp', proxyToUpstream);
 
 // ── HEALTH ──
