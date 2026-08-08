@@ -10,18 +10,19 @@ if (!SLUG) { console.error('FATAL: CTRADER_MCP_TOKEN missing'); process.exit(1);
 
 const watches = new Map();
 
-function setCors(res) {
+// Middleware Global për CORS (Zgjidhja absolute pa yje '*')
+app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'content-type, accept, mcp-session-id, mcp-protocol-version, authorization');
   res.setHeader('Access-Control-Expose-Headers', 'mcp-session-id, mcp-protocol-version');
-}
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
 
-app.options('*', (req, res) => { setCors(res); res.status(204).end(); });
 app.get('/health', (req, res) => res.json({ status: 'ok', watches: watches.size }));
 
 app.get('/icmarkets/mcp', async (req, res) => {
-  setCors(res);
   const sid = req.get('mcp-session-id') || randomUUID();
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -42,7 +43,6 @@ app.get('/icmarkets/mcp', async (req, res) => {
 });
 
 app.post('/icmarkets/mcp', async (req, res) => {
-  setCors(res);
   const sid = req.get('mcp-session-id');
   if (sid) res.setHeader('Mcp-Session-Id', sid);
   
@@ -73,7 +73,7 @@ app.post('/icmarkets/mcp', async (req, res) => {
         if (j.result && Array.isArray(j.result.tools)) {
           j.result.tools.push({
             name: 'register_watch',
-            description: 'Register a technical condition to monitor (e.g. price crosses level).',
+            description: 'Register a technical condition to monitor.',
             inputSchema: { type: 'object', properties: { symbol: { type: 'string' }, condition: { type: 'string' } }, required: ['symbol', 'condition'] }
           });
           j.result.tools.push({
