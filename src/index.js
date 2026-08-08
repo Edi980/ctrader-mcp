@@ -5,6 +5,19 @@ const app = express();
 app.set('trust proxy', true);
 app.use(express.json());
 
+// ── CORS + OPTIONS preflight handling ──
+// Duhet të vijë para proxyToUpstream, përndryshe OPTIONS kalon te fetch()
+// drejt mcp.ctrader.com dhe mbetet i varur pa timeout (→ 504 Railway).
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'content-type, accept, mcp-session-id, mcp-protocol-version, authorization');
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
+
 const MCP_UPSTREAM = 'https://mcp.ctrader.com/trading/mcp';
 const REQ_HEADERS = ['content-type', 'accept', 'mcp-session-id', 'mcp-protocol-version'];
 const RES_HEADERS = ['content-type', 'mcp-session-id', 'mcp-protocol-version'];
@@ -465,7 +478,7 @@ function extractArray(result) {
 // ── REGISTER_WATCH SI MCP TOOL (i injektuar) ──
 const REGISTER_WATCH_TOOL = {
   name: 'register_watch',
-  description: 'Regjistron një setup tregtimi (nga ICT Sniper) për monitorim automatik live me MCP. Kur konfirmohet (VULA FINALE) ose dështon (SL prek), dërgon njoftim në Telegram. Thirre menjëherë pasi gjenerohet Format A/B nga analiza, me të gjitha vlerat numerike (jo intervale).',
+  description: 'Regjistron një setup tregtimi (nga ICT Sniper) për monitorim automatik live me MCP. Kur konfirmohet (VULA FINALE) ose dështon (SL prek), dërgon njoftim në Telegram. Thirre me[...]',
   inputSchema: {
     type: 'object',
     properties: {
@@ -608,7 +621,7 @@ async function proxyToUpstream(req, res) {
     for (const h of REQ_HEADERS) { if (req.headers[h]) headers[h] = req.headers[h]; }
     const fetchOptions = { method: req.method, headers };
     if (req.method !== 'GET' && req.method !== 'HEAD') fetchOptions.body = JSON.stringify(req.body);
-    const upstream = await fetch(MCP_UPSTREAM, fetchOptions);
+    const upstream = await fetch(MCP_UPSTREAM, { ...fetchOptions, signal: AbortSignal.timeout(15000) });
     res.status(upstream.status);
     for (const h of RES_HEADERS) { const v = upstream.headers.get(h); if (v) res.setHeader(h, v); }
     let text = await upstream.text();
