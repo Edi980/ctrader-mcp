@@ -1,6 +1,6 @@
 // src/index.js — MULTISNIPER07 MCP proxy v2.0
 const express = require('express');
-const crypto = require('crypto');
+import crypto from 'crypto';
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 const UPSTREAM = 'https://mcp.ctrader.com/trading/mcp';
