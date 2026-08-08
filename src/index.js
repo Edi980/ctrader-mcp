@@ -2,29 +2,28 @@ import express from 'express';
 import { randomUUID } from 'crypto';
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+// KJO ËSHTË ZGJIDHJA: Detyrohet të pranojë ÇDO GJË që dërgon Gemini si JSON
+app.use(express.json({ type: '*/*', limit: '10mb' }));
 
 const UPSTREAM = 'https://mcp.ctrader.com/trading/mcp';
 const SLUG = process.env.CTRADER_MCP_TOKEN;
 if (!SLUG) { console.error('FATAL: CTRADER_MCP_TOKEN missing'); process.exit(1); }
 
 const SERVER_INFO = { name: 'MULTISNIPER07 MCP', version: '2.0.0' };
-const SUPPORTED_PROTOCOL = '2025-03-26';
 const watches = new Map();
 
-// Middleware Global për CORS (Zgjidhja absolute)
+// Middleware Global për CORS
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'content-type, accept, mcp-session-id, mcp-protocol-version, authorization');
-  res.setHeader('Access-Control-Expose-Headers', 'mcp-session-id, mcp-protocol-version');
-  if (req.method === 'OPTIONS') return res.status(204).end();
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Expose-Headers', '*');
+  if (req.method === 'OPTIONS') return res.status(200).end();
   next();
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', service: SERVER_INFO.name, watches: watches.size }));
+app.get('/health', (req, res) => res.json({ status: 'ok', watches: watches.size }));
 
-// Krijimi i Sesionit
 app.get('/icmarkets/mcp', async (req, res) => {
   const sid = req.get('mcp-session-id') || randomUUID();
   res.setHeader('Content-Type', 'text/event-stream');
@@ -45,32 +44,36 @@ app.get('/icmarkets/mcp', async (req, res) => {
   }
 });
 
-// Komunikimi
 app.post('/icmarkets/mcp', async (req, res) => {
   const sid = req.get('mcp-session-id');
   if (sid) res.setHeader('Mcp-Session-Id', sid);
   
-  const body = req.body;
-  if (!body || body.jsonrpc !== '2.0') return res.status(400).json({ error: 'Parse error' });
+  let body = req.body;
+  // Nëse Gemini e dërgon si string, e konvertojmë me forcë
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch(e) {}
+  }
+  if (!body || typeof body !== 'object') body = {};
 
-  const { id, method, params } = body;
+  const id = body.id || null;
+  const method = body.method;
+  const params = body.params || {};
 
-  // --- KJO ËSHTË PJESA QË MUNGONTE PËR GEMINI ---
+  // Përgjigjja zyrtare që kërkon Gemini për t'u lidhur
   if (method === 'initialize') {
-    const requested = (params && params.protocolVersion) || SUPPORTED_PROTOCOL;
     return res.json({
-      jsonrpc: '2.0', id,
+      jsonrpc: '2.0',
+      id,
       result: {
-        protocolVersion: requested,
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: SERVER_INFO,
-        instructions: 'cTrader MCP proxy for IC Markets demo.',
-      },
+        protocolVersion: params.protocolVersion || '2021-11-08',
+        capabilities: {},
+        serverInfo: SERVER_INFO
+      }
     });
   }
-  if (typeof method === 'string' && method.startsWith('notifications/')) return res.status(202).end();
+
   if (method === 'ping') return res.json({ jsonrpc: '2.0', id, result: {} });
-  // ----------------------------------------------
+  if (typeof method === 'string' && method.startsWith('notifications/')) return res.status(200).end();
 
   if (method === 'tools/call' && params?.name === 'register_watch') {
     const wid = randomUUID();
